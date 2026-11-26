@@ -286,6 +286,97 @@ func TestPush_FetchesBeforePush(t *testing.T) {
 	assert.Equal(t, []string{"fetch", "push"}, callOrder, "fetch must happen before push")
 }
 
+// Regression test for #380: a stale tracking ref must keep its SHA as the
+// force-with-lease value. Fetching it just before push makes the lease vacuous
+// and silently rewinds remote commits the local branch never incorporated.
+func TestPush_KeepsStaleTrackingRefAsLease(t *testing.T) {
+	s := stack.Stack{
+		Trunk: stack.BranchRef{Branch: "main"},
+		Branches: []stack.BranchRef{
+			{Branch: "b1"},
+			{Branch: "b2"},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	writeStackFile(t, tmpDir, s)
+
+	var fetched []string
+
+	mock := newPushMock(tmpDir, "b1")
+	mock.RevParseFn = func(ref string) (string, error) {
+		// Both branches have existing (stale) tracking refs.
+		if ref == "refs/remotes/origin/b1" || ref == "refs/remotes/origin/b2" {
+			return "stale-sha", nil
+		}
+		return "", fmt.Errorf("not found")
+	}
+	mock.FetchBranchesFn = func(remote string, branches []string) error {
+		fetched = append(fetched, branches...)
+		return nil
+	}
+
+	restore := git.SetOps(mock)
+	defer restore()
+
+	cfg, _, errR := config.NewTestConfig()
+	cfg.GitHubClientOverride = &github.MockClient{}
+	cmd := PushCmd(cfg)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+
+	cfg.Err.Close()
+	_, _ = io.ReadAll(errR)
+
+	assert.NoError(t, err)
+	assert.Empty(t, fetched, "branches with an existing tracking ref must not be fetched before push")
+}
+
+func TestPush_FetchesOnlyMissingTrackingRefs(t *testing.T) {
+	s := stack.Stack{
+		Trunk: stack.BranchRef{Branch: "main"},
+		Branches: []stack.BranchRef{
+			{Branch: "b1"},
+			{Branch: "b2"},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	writeStackFile(t, tmpDir, s)
+
+	var fetched []string
+
+	mock := newPushMock(tmpDir, "b1")
+	mock.RevParseFn = func(ref string) (string, error) {
+		if ref == "refs/remotes/origin/b1" {
+			return "existing-sha", nil
+		}
+		// b2 has no tracking ref (never pushed locally).
+		return "", fmt.Errorf("not found")
+	}
+	mock.FetchBranchesFn = func(remote string, branches []string) error {
+		fetched = append(fetched, branches...)
+		return nil
+	}
+
+	restore := git.SetOps(mock)
+	defer restore()
+
+	cfg, _, errR := config.NewTestConfig()
+	cfg.GitHubClientOverride = &github.MockClient{}
+	cmd := PushCmd(cfg)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	err := cmd.Execute()
+
+	cfg.Err.Close()
+	_, _ = io.ReadAll(errR)
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"b2"}, fetched, "only branches without a tracking ref should be fetched")
+}
+
 func TestPush_FetchFailureIsNonFatal(t *testing.T) {
 	s := stack.Stack{
 		Trunk: stack.BranchRef{Branch: "main"},

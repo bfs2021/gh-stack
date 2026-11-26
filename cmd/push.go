@@ -105,10 +105,20 @@ func runPush(cfg *config.Config, opts *pushOptions) error {
 		cfg.Printf("No active branches to push (all merged or queued)")
 		return nil
 	}
-	// Best-effort fetch to update tracking refs (helps --force-with-lease
-	// in shallow clones). Silently ignored if branches don't exist on the
-	// remote yet.
-	_ = git.FetchBranches(remote, activeBranches)
+	// Fetch only branches whose tracking ref is missing. Fetching a branch
+	// that already has a tracking ref would refresh its SHA and turn the
+	// force-with-lease check in git.Push into a no-op, silently overwriting
+	// remote commits the local branch never incorporated. Missing tracking
+	// refs (e.g. in shallow clones) still need a fetch so git.Push can build
+	// a lease for them.
+	var missingTrackingRefs []string
+	for _, b := range activeBranches {
+		sha, err := git.RevParse("refs/remotes/" + remote + "/" + b)
+		if err != nil || sha == "" {
+			missingTrackingRefs = append(missingTrackingRefs, b)
+		}
+	}
+	_ = git.FetchBranches(remote, missingTrackingRefs)
 	cfg.Printf("Pushing %d %s to %s...", len(activeBranches), plural(len(activeBranches), "branch", "branches"), remote)
 	if err := git.Push(remote, activeBranches, true, !opts.noAtomic); err != nil {
 		cfg.Errorf("failed to push: %s", err)
